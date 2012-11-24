@@ -34,11 +34,12 @@
 
 /*task 行为*/
 #define TASK_CREATE	 	0
-#define TASK_SUSPEND	1
-#define TASK_RESUME		2
-#define TASK_RUNUING	3
-#define TASK_WAIT		4
-#define TASK_END 		5
+#define TASK_START  	1
+#define TASK_SUSPEND	2
+#define TASK_RESUME		3
+#define TASK_RUNUING	4
+#define TASK_WAIT		5
+#define TASK_END 		6
 
 /*PAPI Events*/
 

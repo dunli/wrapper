@@ -234,6 +234,8 @@ char * task_state (int i)
 	{
 		case TASK_CREATE:
 			return "TASK_CREATE";
+		case TASK_START:
+			return "TASK_START";
 		case TASK_SUSPEND:
 			return "TASK_SUSPEND";
 		case TASK_RESUME:
