@@ -7,6 +7,8 @@
 
 #include "wrapper.h"
 
+#define OMP_ERROR_RETURN(retval) { fprintf_d (stderr, "[PAPI]Error %d %s:line %d: \n", retval, __FILE__,__LINE__);  exit(retval); }
+
 #define TASK_MAX_NUM	100
 #define TASK_MAX_LEVEL	100
 #define MAX_TEAM_SIZE 	10
@@ -168,7 +170,7 @@ int get_team_num ()
 	for (i = 0; i < Team_num; ++i)
 	{
 		if (Team[i].team_flag == 1 && Team [i].task.thread_id == team_thread_id)
-			return i;
+			return Team[i].team_num;
 	}
 	//If the thread team is not exist ,return 0
 	return 0;
@@ -317,7 +319,7 @@ struct eTask etask_schedule ()
 	struct eTask task;
 	
 	/* need to be done */
-	
+
 	return task;
 }
 
@@ -362,7 +364,8 @@ int remove_etask (struct eTask task)
 //Create a new thread team
 void create_team (TaskInfo task)
 {
-	int i, num = Team_num;
+	int i, num = Team_num++;
+
 	
 	for (i = 0; i < num && i < MAX_TEAM_NUM; ++i)
 	{
@@ -373,16 +376,15 @@ void create_team (TaskInfo task)
 		}
 	}
 
-	if (i == num)
-		num = Team_num++;
-	else
-		num = i;
+	//If the MAX_TEAM_NUM is reached, exit 
+	if (i == MAX_TEAM_NUM)
+		OMP_ERROR_RETURN (-1);
 
-	Team [num].task = current_task;
-	Team [num].team_num = num;
-	Team [num].team_flag = 1;
-	Team [num].etask = NULL;
-	Team [num].itask [0] = task;					//Current task is the task of master thread
+	Team [i].task = current_task;
+	Team [i].team_num = num;
+	Team [i].team_flag = 1;
+	Team [i].etask = NULL;
+	Team [i].itask [0] = task;					//Current task is the task of master thread
 }
 
 //Remove a thread team
