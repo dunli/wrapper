@@ -4,10 +4,9 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <unistd.h>
-
 #include "wrapper.h"
 
-#define OMP_ERROR_RETURN(retval) { fprintf_d (stderr, "[PAPI]Error %d %s:line %d: \n", retval, __FILE__,__LINE__);  exit(retval); }
+#define OMP_ERROR_RETURN(retval) { fprintf_d (stderr, "[OMP]Error %d %s:line %d: \n", retval, __FILE__,__LINE__);  exit(retval); }
 
 #define TASK_MAX_NUM	100
 #define TASK_MAX_LEVEL	100
@@ -17,6 +16,17 @@
 
 #define EXPLICIT_TASK	1
 #define IMPLICIT_TASK	2
+
+//The block type of thread
+#define NO_BOLCK		0
+#define TASKWAIT_BLOCK	1
+#define BARRIER_BLOCK	2
+#define RUN_AT_ONCE_BLOCK	3
+
+//The categories of task
+#define RUNNING_TASK	0
+#define WAITTING_TASK	1
+#define RUN_AT_ONCE_TASK	2
 
 //Implict task data struct
 typedef struct iTask
@@ -31,10 +41,13 @@ typedef struct iTask
 typedef struct eTask
 {
 	TaskInfo task_info;
-	struct eTask * parent_task;
-	struct eTask * child_task;
-	struct eTask * prev_task;
-	struct eTask * next_task;
+	struct eTask * children;							//Point to the newest child task, if there is no child task ,the value is NULL
+	struct eTask * parent;								//Point to this task's parent task, if there isn't parent task, the value is NULL
+	struct eTask * next_child;							//Point to the next task that has the same parent task with this task
+	struct eTask * prev_child;							//Point to the previous task that has the same parent task with this task
+	struct eTask * next_queue;							//Point to the next task in the queue
+	struct eTask * prev_queue;							//Point to the previous task in the queue
+	int kind;											//Task categories of task
 };
 
 typedef struct TeamInfo_
@@ -43,7 +56,8 @@ typedef struct TeamInfo_
 	int team_size;
 	int team_num;										//The number of this thread team in Team []
 	int team_flag;										//When a thread team is ended, the vaule of team_flag will be 0
-	struct eTask *etask;
+	struct eTask *task_queue;
+	struct eTask *etask[MAX_TEAM_SIZE];
 	struct iTask itask[MAX_TEAM_SIZE];
 }TeamInfo;
 
@@ -51,16 +65,9 @@ TeamInfo Team [MAX_TEAM_NUM];
 int Team_num = 0;
 
 static __thread TaskInfo current_task = {0};
-//static __thread blockCount = 0;						//Count the parallel blocks that this thread has created
-
 static __thread int32_t task_count = 0;
-
-/*static __thread int64_t parent_task_id = -1;
-static __thread int64_t current_task_id = -1;
-static __thread int64_t old_task_id [TASK_MAX_NUM];
-static int64_t task_level [TASK_MAX_LEVEL];
-static int current_level = 0;
-static __thread int flag = 0;*/
+static __thread int block_statue = NO_BOLCK;			//Default block
+//static __thread struct eTask * current_etask = NULL;	//Current explicit task that running on this thread
 
 static int pardo_uf_id = 0;								//parallel for 用户子函数编号
 static int par_uf_id = 0;								//parallel 用户子函数编号
@@ -163,11 +170,12 @@ int get_thread_id (int level)
 	return thread_id;
 }
 
+//Get the number of thread team
 int get_team_num ()
 {
 	int i;
 	int team_thread_id  = get_thread_id (get_level () -1);
-	for (i = 0; i < Team_num; ++i)
+	for (i = 0; i < MAX_TEAM_NUM && i < Team_num; ++i)
 	{
 		if (Team[i].team_flag == 1 && Team [i].task.thread_id == team_thread_id)
 			return Team[i].team_num;
@@ -196,7 +204,7 @@ int64_t get_task_id (int thread_id)
 	if (thread_id < 0)
 		return -1;
 	
-	for (i = 0; i < Team_num; ++i)
+	for (i = 0; i < MAX_TEAM_NUM && i < Team_num; ++i)
 	{
 		if (Team [i].task.thread_id == thread_id)
 			return Team [i].task.task_id;
@@ -212,7 +220,7 @@ TaskInfo get_current_task ()
 	int team_thread_id = get_thread_id (get_level () - 1);
 	int thread_num = get_thread_num ();
 
-	for (i = 0; i < num; ++i)
+	for (i = 0; i < MAX_TEAM_NUM && i < num; ++i)
 	{
 		if (Team [i].task.thread_id == team_thread_id && Team [i].team_flag == 1)
 		{
@@ -223,32 +231,6 @@ TaskInfo get_current_task ()
 
 	return task;
 }
-/*//Get the current task 
-TaskInfo get_current_task (int task_type)
-{
-	TaskInfo task;
-	int i;
-	int team_thread_id = get_thread_id (get_level () - 1);
-	int thread_num = get_thread_num ();
-
-	if (type == EXPLICIT_TASK)
-	{
-		need to be done
-	}
-	else if (type == IMPLICIT_TASK)
-	{
-		for (i = 0; i < Team_num; ++i)
-		{
-			if (Team [i].task.thread_id == team_thread_id)
-			{
-				task = Team [i].itask [thread_num];
-				break;
-			}
-		}
-	}
-
-	return task;
-}*/
 
 //Create an implicit task struct 
 struct iTask create_itask ()
@@ -263,16 +245,16 @@ struct iTask create_itask ()
 }
 
 //Create an explicit task struct
-struct eTask create_etask ()
+struct eTask *create_etask ()
 {
-	struct eTask task;
+	struct eTask *task;
 	TaskInfo task_info;
 
 	task_info.task_id = get_new_task_id ();
 	task_info.task_parent_id = current_task.task_id;
 	task_info.flag = 1;
 
-	/*need to be done*/
+	task->task_info = task_info;
 
 	return task;
 }
@@ -284,7 +266,7 @@ int add_itask (struct iTask task)
 	int team_thread_id = get_thread_id (get_level () - 1);
 	int thread_num = get_thread_num ();
 
-	for (i = 0; i < Team_num; ++i)
+	for (i = 0; i < MAX_TEAM_NUM && i < Team_num; ++i)
 	{
 		if (Team [i].team_flag == 1 && Team [i].task.thread_id == team_thread_id)
 		{
@@ -297,16 +279,51 @@ int add_itask (struct iTask task)
 
 //Add a new explicit task to the team, waitting to be scheduled.
 //This function will only be called in Gomp_task () function
-int add_etask (struct eTask task)
+int add_etask (struct eTask *task)
 {
 	int i;
 	int team_thread_id = get_thread_id (get_level () - 1);
+	int num = get_thread_num ();
+	struct eTask *parent_task;
 
-	for (i = 0; i < Team_num; ++i)
+	for (i = 0; i < MAX_TEAM_NUM && i < Team_num; ++i)
 	{
 		if (Team [i].team_flag == 1 && Team [i].task.thread_id == team_thread_id)
 		{
-			/*need to be done*/
+			parent_task = Team [i].etask[num];
+
+			task->parent = parent_task;
+			task->children = NULL;
+			task.kind = WAITTING_TASK;
+
+			if (parent_task->children)
+			{
+				task->next_child = parent_task->children;
+				task->prev_child = parent_task->children->prev_child;
+				task->next_child->prev_child = task;
+				task->prev_child->next_child = task;
+			}
+			else
+			{
+				task->next_child = task;
+				task->prev_child = task;
+			}
+
+			parent_task->children = task;
+
+			if (Team [i]->task_queue)
+			{
+				task->next_queue = team->task_queue;
+				task->prev_queue = team->task_queue->prev_queue;
+				task->next_queue->prev_queue = task;
+				task->prev_queue->next_queue = task;
+			}
+			else
+			{
+				task->next_queue = task;
+				task->prev_queue = task;
+				Team [i].task->queue = task;
+			}
 			return 0;
 		}
 	}
@@ -314,12 +331,97 @@ int add_etask (struct eTask task)
 	return -1;
 }
 
-struct eTask etask_schedule ()
+struct eTask * etask_schedule ()
 {
-	struct eTask task;
-	
-	/* need to be done */
+	struct eTask *task = NULL, *parent_task = NULL, *old_task = NULL;
+	int i, num = -1, thread_num = 0;
+	int team_thread_id = get_thread_id (get_level () - 1);
 
+	for (i = 0; i < MAX_TEAM_NUM && i < Team_num; ++i)
+	{
+		if (Team [i].team_flag == 1 && Team [i].task.thread_id == team_thread_id)
+		{
+			num = i;
+			break;
+		}
+	}
+
+	if (num == -1)
+		fprintf_d (stderr, "[OMP]Schedule Error!!!Please check the task scheduling strategy!!!\n");
+
+	if (block_statue == BARRIER_BLOCK || block_statue == NO_BOLCK)
+	{
+		if (Team [num].task_queue != NULL)
+		{
+			task = Team [num].task_queue;
+			parent_task = task->parent;
+			if (parent_task && parent_task->children == task)
+				parent_task ->children = task->next_child;
+			task->prev_queue->next_queue = task->next_queue;
+			task->next_queue->prev_queue = task->prev_queue;
+
+			if (task->next_queue != task)
+				Team [num].task_queue = task->next_queue;
+			else
+				Team [num].task_queue = NULL;
+			task->kind = RUNNING_TASK;
+		}
+
+		if (task)
+		{
+			parent_task = task->parent;
+			if (parent_task)
+			{
+				task->prev_child->next_child = task->next_child;
+				task->next_child->prev_child = task->prev_child;
+
+				if (parent_task->next_child == task)
+				{
+					if (task->next_child != task)
+						parent_task->children = task->next_child;
+					else
+						parent_task->children = NULL;
+				}
+			}
+		}
+	}
+	else if (block_statue == TASKWAIT_BLOCK)
+	{
+		thread_num = get_thread_num ();
+		old_task = Team [num].etask [thread_num];
+
+		if (old_task->children->kind == WAITTING_TASK)
+		{
+			task = old_task->children;
+			old_task->children = task->next_child;
+			task->prev_queue->next_queue = task->next_queue;
+			task->next_queue->prev_queue = task->prev_queue;
+
+			if (Team [num].task_queue == task)
+			{
+				if (task->next_queue != task)
+					Team [num].task_queue = task->next_queue;
+				else
+					Team [num].task_queue = NULL;
+			}
+
+			task->kind = RUNNING_TASK;
+		}
+
+		if (task)
+		{
+			task->prev_child->next_child = task->next_child;
+			task->next_child->prev_child = task->prev_child;
+
+			if (old_task->children == task)
+			{
+				if (task->next_child != task)
+					old_task->children = task->next_child;
+				else
+					old_task->children = NULL;
+			}
+		}
+	}
 	return task;
 }
 
@@ -345,7 +447,7 @@ int remove_itask (struct iTask task)
 }
 
 //Remove an explicit task from the thread team
-int remove_etask (struct eTask task)
+int remove_etask (struct eTask *task)
 {
 	int i;
 	int team_thread_id = get_thread_id (get_level () - 1);
@@ -376,7 +478,7 @@ void create_team (TaskInfo task)
 		}
 	}
 
-	//If the MAX_TEAM_NUM is reached, exit 
+	//If the MAX_TEAM_NUM is reached, exit with error information
 	if (i == MAX_TEAM_NUM)
 		OMP_ERROR_RETURN (-1);
 
@@ -525,7 +627,7 @@ static void callme_par (void *p1)
 static void callme_task (void *p1)
 {
 	TaskInfo old_task;
-	struct eTask task;
+	struct eTask *task;
 	char fun_name[30] = "Task_User_do_fun_";
 	char id [10];
 
@@ -534,6 +636,8 @@ static void callme_task (void *p1)
 	old_task = current_task;
 	task = etask_schedule ();
 	current_task = task.task_info;
+	current_task.thread_id = get_thread_id (get_level ());
+//	current_etask = task;
 
 	itoa (task_uf_id, id);
 	strcat (fun_name, id);
@@ -902,6 +1006,7 @@ void GOMP_critical_name_end(void **p1)
 void GOMP_barrier (void)
 {
 	TaskInfo old_task;
+	int old_block = block_statue;
 	Record_Event Event = Event_init ();
 	Event.event_name = "GOMP_barrier";
 	Event.eid = 202;
@@ -920,6 +1025,7 @@ void GOMP_barrier (void)
 	
 	GOMP_barrier_real = (void(*)(void)) dlsym (RTLD_NEXT, "GOMP_barrier");
 
+	block_statue = BARRIER_BLOCK;
 	if (GOMP_barrier_real != NULL)
 	{
 		Event.starttime = gettime();
@@ -929,6 +1035,7 @@ void GOMP_barrier (void)
 	else
 		printf_d ("GOMP_barrier is not hooked! exiting!!\n");
 
+	block_statue = old_block;
 	current_task = old_task;
 
 	if (current_task.flag == 1)
@@ -1761,6 +1868,8 @@ void omp_set_num_threads (int p1)
 
 void GOMP_task (void *p1, void *p2, void *p3,long p4, long p5, _Bool p6, unsigned p7)
 {
+	struct eTask *task;
+	int old_block = block_statue;
 	Record_Event Event = Event_init ();
 	Event.event_name = "GOMP_task";
 	Event.eid = 229;
@@ -1776,7 +1885,17 @@ void GOMP_task (void *p1, void *p2, void *p3,long p4, long p5, _Bool p6, unsigne
 		Event.task_state_start = TASK_CREATE;
 	}
 
-	create_etask ();
+	if (p6)
+	{
+		/*Create a task that will be executed immediately*/
+		block_statue = RUN_AT_ONCE_BLOCK;
+	}
+	else
+	{
+		task = create_etask ();
+		add_etask (task);
+	}
+	
 
 	GOMP_task_real = (void(*)(void *,void *,void *,long,long,_Bool,unsigned))dlsym(RTLD_NEXT,"GOMP_task");
 
@@ -1789,6 +1908,8 @@ void GOMP_task (void *p1, void *p2, void *p3,long p4, long p5, _Bool p6, unsigne
 		GOMP_task_real (callme_task, p2, p3, p4, p5, p6, p7);
 		Event.endtime = gettime();
 	}
+
+	block_statue = old_block;
 
 	if (current_task.flag == 1)
 	{
@@ -1803,6 +1924,7 @@ void GOMP_task (void *p1, void *p2, void *p3,long p4, long p5, _Bool p6, unsigne
 void GOMP_taskwait (void)
 {
 	TaskInfo old_task;
+	int old_block = block_statue;
 	Record_Event Event = Event_init ();
 	Event.event_name = "GOMP_taskwait";
 	Event.eid = 228;
@@ -1821,13 +1943,14 @@ void GOMP_taskwait (void)
 
 	GOMP_taskwait_real = (void(*)(void))dlsym(RTLD_NEXT,"GOMP_taskwait");
 
+	block_statue = TASKWAIT_BLOCK;
 	if(GOMP_taskwait_real != NULL)
 	{
 		Event.starttime = gettime();
 		GOMP_taskwait_real ();
 		Event.endtime = gettime ();
 	}
-
+	block_statue = old_block;
 	current_task = old_task;
 	if (current_task.flag == 1)
 	{

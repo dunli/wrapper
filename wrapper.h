@@ -32,7 +32,7 @@
 #define CUDA_KER	7
 //long unsigned Local_offset=0;
 
-/*task 行为*/
+/*task behavior*/
 #define TASK_CREATE	 	0
 #define TASK_START  	1
 #define TASK_SUSPEND	2
